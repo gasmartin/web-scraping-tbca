@@ -1,3 +1,4 @@
+# ATENÇÃO: Este repositório é um fork. O código original pode ser encontrado [aqui](https://github.com/resen-dev/web-scraping-tbca)
 
 # Tabela Brasileira de Composição de Alimentos - Web Scraping - Download 
 
