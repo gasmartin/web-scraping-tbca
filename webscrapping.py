@@ -1,92 +1,151 @@
 import json
+import re
+from typing import Dict, List
+
 import requests
 from bs4 import BeautifulSoup
 
-caminho_arquivo = "alimentos.txt"
-valores_principais = []
+from constants import BASE_URL, FOOD_DATA_BASE_URL, NAME_AND_DESCRIPTION_PATTERN, FILE_PATH
 
-url_base = 'http://www.tbca.net.br/base-dados/composicao_alimentos.php'
 
-cod_alimentos = []
+def collect_food_data(food_id: str) -> Dict[str, str | float] | None:
+    def __convert_string_to_float(value: str):
+        try:
+            return float(value.replace(",", ".").strip())
+        except ValueError:
+            return 0.0
 
-parametros = {'pagina': 1}
+    print(f"Extracting food data from {food_id}...")
 
-continuar_loop = True
+    food_data = {}
+    portions = []
 
-while continuar_loop:
-    response = requests.get(url_base, params=parametros)
-
-    if response.status_code == 200:
-        html_content = response.text
-
-        soup = BeautifulSoup(html_content, 'html.parser')
-
-        tbody_element = soup.find('tbody')
-
-        if tbody_element:
-
-            tr_elements = tbody_element.find_all('tr')
-
-            if tr_elements:
-
-                for tr in tr_elements:
-                    td_1 = tr.find_all('td')[0].text.strip()
-                    td_5 = tr.find_all('td')[4].text.strip()
-                    cod_alimentos.append((td_1, td_5))
-            else:
-
-                continuar_loop = False
-        else:
-
-            continuar_loop = False
-
-        parametros['pagina'] += 1
-
-    else:
-        continuar_loop = False
-
-cod_alimentos = list(set(cod_alimentos))
-
-result = []
-
-for cod_alimento, classe_alimento in cod_alimentos:
-
-    url = f'http://www.tbca.net.br/base-dados/int_composicao_alimentos.php?cod_produto={cod_alimento}'
-
-    response = requests.get(url)
+    response = requests.get(f"{FOOD_DATA_BASE_URL}?cod_produto={food_id}")
 
     soup = BeautifulSoup(response.content, 'html.parser')
 
-    description_element = soup.find('h5', {'id': 'overview'})
-    descricao = description_element.text.split('Descrição:')[1].split('<<')[0].strip()
+    description_element = soup.find("h5", {"id": "overview"})
 
-    table = soup.find('table')
+    if not description_element:
+        return
 
-    thead = table.find('thead')
-    headers = thead.find_all('th')[:3]
+    description_text = description_element.text
 
-    tbody = table.find('tbody')
-    rows = tbody.find_all('tr')
+    if not (match := re.search(NAME_AND_DESCRIPTION_PATTERN, description_text)):
+        return
 
-    nutrientes = []
+    food_data["name"] = match.group("name").strip()
 
-    for row in rows:
-        values = row.find_all('td')[:3]
-        row_data = {}
-        for i, header in enumerate(headers):
-            row_data[header.text.strip()] = values[i].text.strip()
-        nutrientes.append(row_data)
+    description = match.group("description").strip()
 
-    alimento_json = {
-        'codigo': cod_alimento,
-        'classe': classe_alimento,
-        'descricao': descricao,
-        'nutrientes': nutrientes
-    }
+    if description.endswith(","):
+        description = description[:-1]
 
-    with open(caminho_arquivo, "a") as file:
+    food_data["description"] = description
 
-        produto_json_str = json.dumps(alimento_json)
+    table = soup.find("table")
 
-        file.write(produto_json_str + "\n")
+    if not table:
+        return
 
+    thead = table.find("thead")
+    tbody = table.find("tbody")
+
+    if not thead or not tbody:
+        return
+
+    headers = thead.find_all("th")[3:]
+
+    for header in headers:
+        portions.append({"name": header.text})
+
+    rows = tbody.find_all("tr")
+
+    # FIXME: I am not proud of that
+    for index, row in enumerate(rows):
+        if index == 1:  # Calories
+            tds = row.find_all("td")[2:]
+            food_data["kcal"] = __convert_string_to_float(tds[0].text)
+            for i, td in enumerate(tds[1:]):
+                portions[i]["kcal"] = __convert_string_to_float(td.text)
+        elif index == 3:  # Carbohydrates
+            tds = row.find_all("td")[2:]
+            food_data["carbohydrates"] = __convert_string_to_float(tds[0].text)
+            for i, td in enumerate(tds[1:]):
+                portions[i]["carbohydrates"] = __convert_string_to_float(td.text)
+        elif index == 5:  # Protein
+            tds = row.find_all("td")[2:]
+            food_data["protein"] = __convert_string_to_float(tds[0].text)
+            for i, td in enumerate(tds[1:]):
+                portions[i]["protein"] = __convert_string_to_float(td.text)
+        elif index == 6:  # Lipids
+            tds = row.find_all("td")[2:]
+            food_data["lipids"] = __convert_string_to_float(tds[0].text)
+            for i, td in enumerate(tds[1:]):
+                portions[i]["lipids"] = __convert_string_to_float(td.text)
+    
+    food_data["portions"] = portions
+
+    return food_data
+
+
+def get_food_ids(page: int) -> List[str]:
+    print(f"Extracting food IDs from page {page}...")
+
+    food_ids = []
+
+    response = requests.get(BASE_URL, params={"pagina": page})
+
+    if response.status_code != 200:
+        return []
+
+    soup = BeautifulSoup(response.content, "html.parser")
+
+    tbody = soup.find("tbody")
+
+    if not tbody:
+        return []
+
+    tr_elements = tbody.find_all("tr")
+
+    if not tr_elements:
+        return []
+
+    for tr in tr_elements:
+        food_ids.append(tr.find_all("td")[0].text)
+
+    return food_ids
+
+
+def main():
+    food_ids = []
+    page = 1
+
+    while (current_page_ids := get_food_ids(page)):
+        food_ids.extend(current_page_ids)
+        page += 1
+
+    print(food_ids)
+    print("Número de IDs:", len(food_ids))
+
+    foods = []
+
+    for food_id in food_ids:
+        # FIXME: I am not proud of that
+        try:
+            food_data = collect_food_data(food_id)
+        except:
+            try:
+                food_data = collect_food_data(food_id)
+            except:
+                food_data = None
+        if food_data:
+            foods.append(food_data)
+    
+    with open(FILE_PATH, "w") as file:
+        json.dump(foods, file, ensure_ascii=False, indent=4)
+
+
+if __name__ == "__main__":
+    main()
+    # print(collect_food_data("BRC0923F"))
